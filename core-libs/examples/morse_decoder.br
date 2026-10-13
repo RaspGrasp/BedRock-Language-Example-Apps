@@ -1,0 +1,139 @@
+include "wdt_disable_riscv";
+
+root BASE  = 0x42000008;
+root STACK = 0x3FC9F000;
+root DATA  = 0x3FC8F000;
+
+root GPIO_OUT_W1TS    = 0x60004008;
+root GPIO_OUT_W1TC    = 0x6000400C;
+root GPIO_ENABLE_W1TS = 0x60004024;
+root GPIO_IN          = 0x6000403C;
+root IO_MUX_GPIO8     = 0x60009024;
+root IO_MUX_GPIO9     = 0x60009028;
+
+root LED_BIT  = 1 << 8;
+root BOOT_BIT = 1 << 9;
+
+// --- USB-Serial-JTAG (previously validated) ---
+root USB_EP1      = 0x60043000;
+root USB_EP1_CONF = 0x60043004;
+
+// --- Timing (tune to how long you naturally hold the button) ---
+// busy-loop iterations while the button is held: below this = dot, above = dash
+root DASH_THRESHOLD = 150000;
+// number of silence "ticks" (each tick = delay(50000)) before we decide the letter is done
+root SILENT_LIMIT = 60;
+
+fn delay(n) {
+    let i = 0;
+    while (i < n) {
+        i = i + 1;
+    }
+}
+
+fn led_on() {
+    poke(GPIO_OUT_W1TC, LED_BIT);
+}
+
+fn led_off() {
+    poke(GPIO_OUT_W1TS, LED_BIT);
+}
+
+fn blink_feedback() {
+    led_on();
+    delay(60000);
+    led_off();
+}
+
+fn serial_send_char(c) {
+    while ((peek(USB_EP1_CONF) & 2) == 0) {
+        // wait until there's room in the TX buffer
+    }
+    poke(USB_EP1, c);
+    poke(USB_EP1_CONF, 1); // commit (WR_DONE)
+}
+
+// Decodes `code` (built trie-style: code=1, then code=code*2+symbol
+// per symbol) into an English letter and sends it over serial.
+// 0 = dot, 1 = dash.
+fn decode_and_send(code) {
+    if (code == 5)  { serial_send_char(65); serial_send_char(10); return; } // A .-
+    if (code == 24) { serial_send_char(66); serial_send_char(10); return; } // B -...
+    if (code == 26) { serial_send_char(67); serial_send_char(10); return; } // C -.-.
+    if (code == 12) { serial_send_char(68); serial_send_char(10); return; } // D -..
+    if (code == 2)  { serial_send_char(69); serial_send_char(10); return; } // E .
+    if (code == 18) { serial_send_char(70); serial_send_char(10); return; } // F ..-.
+    if (code == 14) { serial_send_char(71); serial_send_char(10); return; } // G --.
+    if (code == 16) { serial_send_char(72); serial_send_char(10); return; } // H ....
+    if (code == 4)  { serial_send_char(73); serial_send_char(10); return; } // I ..
+    if (code == 23) { serial_send_char(74); serial_send_char(10); return; } // J .---
+    if (code == 13) { serial_send_char(75); serial_send_char(10); return; } // K -.-
+    if (code == 20) { serial_send_char(76); serial_send_char(10); return; } // L .-..
+    if (code == 7)  { serial_send_char(77); serial_send_char(10); return; } // M --
+    if (code == 6)  { serial_send_char(78); serial_send_char(10); return; } // N -.
+    if (code == 15) { serial_send_char(79); serial_send_char(10); return; } // O ---
+    if (code == 22) { serial_send_char(80); serial_send_char(10); return; } // P .--.
+    if (code == 29) { serial_send_char(81); serial_send_char(10); return; } // Q --.-
+    if (code == 10) { serial_send_char(82); serial_send_char(10); return; } // R .-.
+    if (code == 8)  { serial_send_char(83); serial_send_char(10); return; } // S ...
+    if (code == 3)  { serial_send_char(84); serial_send_char(10); return; } // T -
+    if (code == 9)  { serial_send_char(85); serial_send_char(10); return; } // U ..-
+    if (code == 17) { serial_send_char(86); serial_send_char(10); return; } // V ...-
+    if (code == 11) { serial_send_char(87); serial_send_char(10); return; } // W .--
+    if (code == 25) { serial_send_char(88); serial_send_char(10); return; } // X -..-
+    if (code == 27) { serial_send_char(89); serial_send_char(10); return; } // Y -.--
+    if (code == 28) { serial_send_char(90); serial_send_char(10); return; } // Z --..
+    // unrecognized sequence
+    serial_send_char(63);
+    serial_send_char(10);
+}
+
+fn main() {
+    wdt_disable_all();
+
+    poke(IO_MUX_GPIO8, 0x1000);
+    poke(IO_MUX_GPIO9, 0x1280);
+    poke(GPIO_ENABLE_W1TS, LED_BIT);
+    led_off();
+
+    loop {
+        let code = 1;
+        let got_symbol = 0;
+        let last = BOOT_BIT;
+        let silent = 0;
+
+        while (silent < SILENT_LIMIT) {
+            let now = peek(GPIO_IN) & BOOT_BIT;
+
+            if ((last != 0) && (now == 0)) {
+                // press moment (falling edge)
+                delay(30000); // debounce
+                let dur = 0;
+                while ((peek(GPIO_IN) & BOOT_BIT) == 0) {
+                    dur = dur + 1;
+                }
+                delay(30000); // debounce after release
+
+                let sym = 0;
+                if (dur >= DASH_THRESHOLD) {
+                    sym = 1;
+                }
+                code = code * 2 + sym;
+                got_symbol = 1;
+                silent = 0;
+
+                blink_feedback();
+
+                now = BOOT_BIT;
+            }
+
+            last = now;
+            silent = silent + 1;
+            delay(50000);
+        }
+
+        if (got_symbol == 1) {
+            decode_and_send(code);
+        }
+    }
+}
